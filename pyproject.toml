@@ -1,0 +1,13 @@
+[project]
+name = "smart-router-python"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "pydantic>=2.12.5",
+    "pytest>=9.0.2",
+    "starlette>=0.52.1",
+    "uvicorn>=0.41.0",
+]
