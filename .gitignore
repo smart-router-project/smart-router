@@ -8,6 +8,7 @@ __pycache__/
 venv/
 env/
 ENV/
+.uv-cache
 
 # Build and packaging artifacts
 build/
