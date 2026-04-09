@@ -47,9 +47,9 @@ app = Starlette(
 )
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # build config
     config = build_config(args)
@@ -65,4 +65,14 @@ if __name__ == "__main__":
     )
     engine_process.start()
 
-    uvicorn.run("smart_router.entrypoints.serve.api_server:app", host=args.host, port=args.port, workers=8)
+    uvicorn.run(
+        "smart_router.entrypoints.serve.api_server:app",
+        host=args.host,
+        port=args.port,
+        workers=args.apiserver_workers,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

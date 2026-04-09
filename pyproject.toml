@@ -13,3 +13,20 @@ dependencies = [
     "uvicorn>=0.41.0",
     "zmq>=0.0.0",
 ]
+
+[project.optional-dependencies]
+benchmark = [
+    "aiohttp>=3.12.13",
+    "numpy>=2.3.1",
+    "pandas>=2.3.1",
+    "tqdm>=4.67.1",
+    "transformers>=4.53.0",
+    "xlsxwriter>=3.2.5",
+]
+
+[project.scripts]
+smart-router = "smart_router.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
