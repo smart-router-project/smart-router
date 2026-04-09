@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 import platform
 import uvicorn
 
@@ -12,6 +14,8 @@ from smart_router.engine.engine_client import EngineClient
 from smart_router.engine.vllm_engine import start_engine
 from smart_router.entrypoints.serve.vllm_routes import VllmRoutes
 from smart_router.logger import init_logging
+
+MODEL_SOURCE_URLS_ENV = "SMART_ROUTER_MODEL_SOURCE_URLS"
 
  # 检测操作系统
 is_linux = platform.system() == "Linux"
@@ -27,15 +31,42 @@ else:
 
 async def startup():
     app.state.engine_client = EngineClient(input_addr, output_addr)
+    app.state.model_source_urls = _load_model_source_urls()
     asyncio.create_task(app.state.engine_client.receive_loop())
 
 async def shutdown():
-    app.state.engine_client.shutdown()
+    await app.state.engine_client.shutdown()
+    await vllm_routes.close()
+
+
+def _dump_model_source_urls(prefill_urls: list[str] | None, decode_urls: list[str] | None) -> None:
+    urls = []
+    for url in (prefill_urls or []) + (decode_urls or []):
+        if url and url not in urls:
+            urls.append(url)
+    os.environ[MODEL_SOURCE_URLS_ENV] = json.dumps(urls)
+
+
+def _load_model_source_urls() -> list[str]:
+    raw = os.getenv(MODEL_SOURCE_URLS_ENV)
+    if not raw:
+        return []
+
+    try:
+        urls = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(urls, list):
+        return []
+
+    return [url for url in urls if isinstance(url, str) and url]
 
 
 vllm_routes = VllmRoutes()
 
 routes = [
+    Route("/v1/models", vllm_routes.models, methods=["GET"]),
     Route("/v1/chat/completions", vllm_routes.chat_completions, methods=["POST"]),
     # Route("/v1/completions", completions, methods=["POST"]),
 ]
@@ -53,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # build config
     config = build_config(args)
+    _dump_model_source_urls(config.prefill_urls, config.decode_urls)
 
     init_logging(args.log_level)
 
