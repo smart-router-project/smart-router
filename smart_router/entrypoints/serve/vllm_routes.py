@@ -10,8 +10,7 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
-from smart_router.worker import  Worker
-from smart_router.engine.engine import  EngineRequest, EngineResponse, RequestType
+from smart_router.engine.engine import EngineRequest, EngineResponse, RequestType
 
 
 logger = logging.getLogger(__name__)
@@ -193,6 +192,7 @@ class VllmRoutes:
                 api_kind=api_kind,
             )
         return await self._handle_non_stream_request(
+            request=request,
             body=body,
             headers=headers,
             request_text=request_text,
@@ -240,6 +240,7 @@ class VllmRoutes:
             decode_url,
         )
 
+        prefill_response: httpx.Response | None = None
         try:
             prefill_body = self._get_prefill_body(body)
             prefill_headers = self._get_prefill_headers(headers, request_id, prefill_rank)
@@ -252,7 +253,7 @@ class VllmRoutes:
             logger.debug(
                 "vLLM Stage1 Prefill start id=%s url=%s endpoint=%s",
                 request_id,
-                prefill_rank,
+                prefill_url,
                 endpoint_path,
             )
             prefill_response = await self.http_client.post(
@@ -261,13 +262,11 @@ class VllmRoutes:
                 headers=prefill_headers,
             )
         finally:
+            await self._decrement_worker(request, prefill_url, prefill_rank)
             logger.debug("vLLM Stage1 Prefill finish id=%s", request_id)
 
         if not prefill_response.is_success:
             return await self._build_upstream_error_response("Prefill", prefill_response)
-
-        # decrement
-        await self._decrement_worker(request, prefill_url, prefill_rank)
 
         return {
             "decode_url": decode_url,
@@ -307,7 +306,8 @@ class VllmRoutes:
         if isinstance(context_or_response, Response):
             return context_or_response
 
-        decode: Worker = context_or_response["decode"]
+        decode_url: str = context_or_response["decode_url"]
+        decode_rank: int = context_or_response["decode_rank"]
         request_id: str = context_or_response["request_id"]
         prefill_response: httpx.Response = context_or_response["prefill_response"]
 
@@ -321,21 +321,22 @@ class VllmRoutes:
         )
         decode_body = copy.deepcopy(body)
         decode_body["kv_transfer_params"] = kv_transfer_params
-        decode_headers = self._get_decode_headers(headers, request_id, decode.dp_rank())
+        decode_headers = self._get_decode_headers(headers, request_id, decode_rank)
 
         try:
             logger.debug(
                 "vLLM Stage2 Decode start id=%s url=%s endpoint=%s mode=non-stream",
                 request_id,
-                decode.url(),
+                decode_url,
                 endpoint_path,
             )
             decode_response = await self.http_client.post(
-                decode.endpoint_url(endpoint_path),
+                f"{decode_url}{endpoint_path}",
                 json=decode_body,
                 headers=decode_headers,
             )
         finally:
+            await self._decrement_worker(request, decode_url, decode_rank)
             logger.debug("vLLM Stage2 Decode finish id=%s mode=non-stream", request_id)
 
         if not decode_response.is_success:
