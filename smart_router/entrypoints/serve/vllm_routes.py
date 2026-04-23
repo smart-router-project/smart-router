@@ -3,23 +3,137 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, Optional
 import asyncio
+from typing import Any, Dict, Optional
 
 import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
-from smart_router.worker import  Worker
-from smart_router.engine.engine import  EngineRequest, EngineResponse, RequestType
+from smart_router.engine.engine import EngineRequest, EngineResponse, RequestType
 
 
 logger = logging.getLogger(__name__)
 
 class VllmRoutes:
-    def __init__(self):
+    def __init__(self, http_client: Any | None = None):
         # Shared async HTTP client for forwarding requests.
-        self.http_client = httpx.AsyncClient(timeout=60 * 60.0)
+        self.http_client = http_client or httpx.AsyncClient(timeout=60 * 60.0)
+
+    async def close(self) -> None:
+        if hasattr(self.http_client, "aclose"):
+            await self.http_client.aclose()
+
+    async def models(self, request: Request) -> Response:
+        headers = self._sanitize_headers(request)
+        source_urls = getattr(request.app.state, "model_source_urls", [])
+        if not source_urls:
+            return JSONResponse({"object": "list", "data": []})
+
+        responses = await asyncio.gather(
+            *[self._fetch_models_from_source(url, headers) for url in source_urls]
+        )
+
+        successful_sources = 0
+        models_by_id: Dict[str, Dict[str, Any]] = {}
+        for response in responses:
+            if response is None:
+                continue
+
+            successful_sources += 1
+            for model in response:
+                model_id = model.get("id")
+                if not isinstance(model_id, str) or not model_id:
+                    continue
+                if model_id not in models_by_id:
+                    models_by_id[model_id] = model
+                    continue
+
+                existing = models_by_id[model_id]
+                for key, value in model.items():
+                    if key not in existing or existing[key] in (None, "", [], {}):
+                        existing[key] = value
+                if isinstance(model.get("max_model_len"), int):
+                    existing_max_model_len = existing.get("max_model_len")
+                    if not isinstance(existing_max_model_len, int):
+                        existing_max_model_len = 0
+                    existing["max_model_len"] = max(
+                        existing_max_model_len,
+                        model["max_model_len"],
+                    )
+
+        if successful_sources == 0:
+            return JSONResponse(
+                {"error": "No available upstream /v1/models endpoint"},
+                status_code=503,
+            )
+
+        return JSONResponse(
+            {
+                "object": "list",
+                "data": [models_by_id[key] for key in sorted(models_by_id)],
+            }
+        )
+
+    async def _fetch_models_from_source(
+        self,
+        source_url: str,
+        headers: Dict[str, str],
+    ) -> Optional[list[Dict[str, Any]]]:
+        try:
+            response = await self.http_client.get(
+                f"{source_url.rstrip('/')}/v1/models",
+                headers=headers,
+            )
+        except Exception:
+            logger.exception("Failed to fetch /v1/models from %s", source_url)
+            return None
+
+        if not response.is_success:
+            logger.warning(
+                "Upstream /v1/models request failed url=%s status=%s",
+                source_url,
+                response.status_code,
+            )
+            return None
+
+        try:
+            payload = response.json()
+        except Exception:
+            logger.exception("Upstream /v1/models returned invalid JSON from %s", source_url)
+            return None
+
+        return self._extract_model_cards(payload, source_url)
+
+    def _extract_model_cards(
+        self,
+        payload: Any,
+        source_url: str,
+    ) -> list[Dict[str, Any]]:
+        if isinstance(payload, dict):
+            raw_models = payload.get("data", [])
+        elif isinstance(payload, list):
+            raw_models = payload
+        else:
+            logger.warning("Unexpected /v1/models payload type from %s", source_url)
+            return []
+
+        models: list[Dict[str, Any]] = []
+        for raw_model in raw_models:
+            if not isinstance(raw_model, dict):
+                continue
+
+            model_id = raw_model.get("id")
+            if not isinstance(model_id, str) or not model_id:
+                continue
+
+            model = copy.deepcopy(raw_model)
+            model.setdefault("id", model_id)
+            model.setdefault("object", "model")
+            model.setdefault("owned_by", "smart-router")
+            models.append(model)
+
+        return models
 
 
     async def completions(self, request: Request) -> Response:
@@ -78,6 +192,7 @@ class VllmRoutes:
                 api_kind=api_kind,
             )
         return await self._handle_non_stream_request(
+            request=request,
             body=body,
             headers=headers,
             request_text=request_text,
@@ -125,6 +240,7 @@ class VllmRoutes:
             decode_url,
         )
 
+        prefill_response: httpx.Response | None = None
         try:
             prefill_body = self._get_prefill_body(body)
             prefill_headers = self._get_prefill_headers(headers, request_id, prefill_rank)
@@ -137,7 +253,7 @@ class VllmRoutes:
             logger.debug(
                 "vLLM Stage1 Prefill start id=%s url=%s endpoint=%s",
                 request_id,
-                prefill_rank,
+                prefill_url,
                 endpoint_path,
             )
             prefill_response = await self.http_client.post(
@@ -146,13 +262,11 @@ class VllmRoutes:
                 headers=prefill_headers,
             )
         finally:
+            await self._decrement_worker(request, prefill_url, prefill_rank)
             logger.debug("vLLM Stage1 Prefill finish id=%s", request_id)
 
         if not prefill_response.is_success:
             return await self._build_upstream_error_response("Prefill", prefill_response)
-
-        # decrement
-        await self._decrement_worker(request, prefill_url, prefill_rank)
 
         return {
             "decode_url": decode_url,
@@ -192,7 +306,8 @@ class VllmRoutes:
         if isinstance(context_or_response, Response):
             return context_or_response
 
-        decode: Worker = context_or_response["decode"]
+        decode_url: str = context_or_response["decode_url"]
+        decode_rank: int = context_or_response["decode_rank"]
         request_id: str = context_or_response["request_id"]
         prefill_response: httpx.Response = context_or_response["prefill_response"]
 
@@ -206,21 +321,22 @@ class VllmRoutes:
         )
         decode_body = copy.deepcopy(body)
         decode_body["kv_transfer_params"] = kv_transfer_params
-        decode_headers = self._get_decode_headers(headers, request_id, decode.dp_rank())
+        decode_headers = self._get_decode_headers(headers, request_id, decode_rank)
 
         try:
             logger.debug(
                 "vLLM Stage2 Decode start id=%s url=%s endpoint=%s mode=non-stream",
                 request_id,
-                decode.url(),
+                decode_url,
                 endpoint_path,
             )
             decode_response = await self.http_client.post(
-                decode.endpoint_url(endpoint_path),
+                f"{decode_url}{endpoint_path}",
                 json=decode_body,
                 headers=decode_headers,
             )
         finally:
+            await self._decrement_worker(request, decode_url, decode_rank)
             logger.debug("vLLM Stage2 Decode finish id=%s mode=non-stream", request_id)
 
         if not decode_response.is_success:
