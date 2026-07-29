@@ -338,7 +338,7 @@ def test_engine_shutdown_stops_policies():
     asyncio.run(run())
 
 
-def test_api_health_route_returns_engine_health_status():
+def test_api_livez_route_returns_engine_health_status():
     class FakeEngineClient:
         identity = "test-client"
 
@@ -358,12 +358,12 @@ def test_api_health_route_returns_engine_health_status():
             )
             return future
 
-    app = Starlette(routes=[Route("/health", api_server.health, methods=["GET"])])
+    app = Starlette(routes=[Route("/livez", api_server.health, methods=["GET"])])
     app.state.engine_client = FakeEngineClient()
     app.state.health_timeout_secs = 1
 
     with TestClient(app) as client:
-        response = client.get("/health")
+        response = client.get("/livez")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -375,7 +375,7 @@ def test_api_health_route_returns_engine_health_status():
     }
 
 
-def test_api_health_route_includes_regular_counts_for_normal_mode():
+def test_api_livez_route_includes_regular_counts_for_normal_mode():
     class FakeEngineClient:
         identity = "test-client"
 
@@ -396,12 +396,12 @@ def test_api_health_route_includes_regular_counts_for_normal_mode():
             )
             return future
 
-    app = Starlette(routes=[Route("/health", api_server.health, methods=["GET"])])
+    app = Starlette(routes=[Route("/livez", api_server.health, methods=["GET"])])
     app.state.engine_client = FakeEngineClient()
     app.state.health_timeout_secs = 1
 
     with TestClient(app) as client:
-        response = client.get("/health")
+        response = client.get("/livez")
 
     assert response.status_code == 200
     assert response.json()["regular_healthy"] == 1
@@ -428,3 +428,43 @@ def test_api_health_route_registered_for_vllm_and_sglang_apps():
 
     assert "/health" in {route.path for route in vllm_app.routes}
     assert "/health" in {route.path for route in sglang_app.routes}
+
+
+def test_api_health_route_returns_ok_without_engine_client():
+    app = Starlette(routes=[Route("/health", api_server.health, methods=["GET"])])
+
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_api_livez_route_registered_for_all_modes():
+    vllm_pd_app = api_server._build_app(
+        SmartRouterConfig(
+            router_mode_config=RouterModeConfig(
+                router_type="vllm",
+                pd_disaggregation=True,
+            )
+        )
+    )
+    sglang_pd_app = api_server._build_app(
+        SmartRouterConfig(
+            router_mode_config=RouterModeConfig(
+                router_type="sglang",
+                pd_disaggregation=True,
+            )
+        )
+    )
+    normal_app = api_server._build_app(
+        SmartRouterConfig(
+            router_mode_config=RouterModeConfig(
+                router_type="vllm",
+                pd_disaggregation=False,
+            )
+        )
+    )
+
+    for app in (vllm_pd_app, sglang_pd_app, normal_app):
+        assert "/livez" in {route.path for route in app.routes}

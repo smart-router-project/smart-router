@@ -134,6 +134,7 @@ def _build_app(config):
         )
         routes = [
             Route("/health", health, methods=["GET"]),
+            Route("/livez", livez, methods=["GET"]),
             Route("/v1/models", model_routes.models, methods=["GET"]),
             Route("/v1/chat/completions", sglang_routes.chat_completions, methods=["POST"]),
             Route("/v1/completions", sglang_routes.completions, methods=["POST"]),
@@ -157,6 +158,7 @@ def _build_app(config):
         )
         routes = [
             Route("/health", health, methods=["GET"]),
+            Route("/livez", livez, methods=["GET"]),
             Route("/v1/models", vllm_routes.models, methods=["GET"]),
             Route("/v1/chat/completions", vllm_routes.chat_completions, methods=["POST"]),
             Route("/v1/completions", vllm_routes.completions, methods=["POST"]),
@@ -180,6 +182,7 @@ def _build_app(config):
         )
         routes = [
             Route("/health", health, methods=["GET"]),
+            Route("/livez", livez, methods=["GET"]),
             Route("/v1/models", model_routes.models, methods=["GET"]),
             Route("/v1/chat/completions", normal_routes.chat_completions, methods=["POST"]),
             Route("/v1/completions", normal_routes.completions, methods=["POST"]),
@@ -199,6 +202,17 @@ def _build_app(config):
 
 
 async def health(request):
+    """Lightweight liveness probe: reports only whether the router process
+    is alive.
+
+    Deliberately does NOT check backend workers, so slow model loading or
+    backend outages never cause the router pod to be restarted by k8s.
+    """
+    return JSONResponse({"status": "ok"}, status_code=200)
+
+
+async def livez(request):
+    """Backend-aware readiness probe: checks worker health via the engine."""
     engine_client = getattr(request.app.state, "engine_client", None)
     if engine_client is None:
         return JSONResponse(
